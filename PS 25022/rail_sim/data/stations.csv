@@ -1,0 +1,16 @@
+code,name,has_loop,num_loops,num_platforms,max_train_len_m,is_junction,dwell_mean_s,dwell_std_dev_s
+SBC,KSR Bengaluru,True,4,5,700,True,60,15
+YPR,Yesvantpur,True,3,4,700,True,45,10
+TK,Tumakuru,True,2,2,650,False,30,5
+ASK,Arsikere Jn,True,2,2,650,True,45,10
+RRB,Birur Jn,True,2,2,650,True,45,10
+DVG,Davangere,True,3,2,700,False,45,10
+HRR,Harihar,True,1,1,600,False,30,5
+RNR,Ranibennur,True,1,1,600,False,30,5
+HVR,Haveri,True,2,2,650,False,30,5
+UBL,SSS Hubballi,True,4,5,700,True,60,15
+DMM,Dharmavaram,True,2,2,650,False,30,5
+ATP,Anantapur,True,2,2,650,False,30,5
+GTL,Guntakal Jn,True,3,4,700,True,60,15
+HPT,Hosapete,True,1,1,600,False,30,5
+GDG,Gadag Jn,True,2,2,650,False,30,5

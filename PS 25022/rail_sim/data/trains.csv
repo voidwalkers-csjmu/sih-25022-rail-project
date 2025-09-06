@@ -1,0 +1,5 @@
+train_id,category,priority,vmax_kmph,acceleration_ms2,base_deceleration_ms2,length_m,route,depart_time_s
+T1-SBC-ASK,express,1,110,0.5,0.8,300,SBC|YPR|TK|ASK,0
+T2-UBL-ASK,express,1,110,0.5,0.8,300,UBL|HVR|DVG|RRB|ASK,1000
+T3-YPR-ASK,passenger,2,90,0.3,0.6,250,YPR|TK|ASK,2000
+T4-DVG-SBC,goods,4,70,0.1,0.4,700,DVG|RRB|ASK|TK|YPR|SBC,3000
