@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Dict
 
 @dataclass
 class Train:
@@ -16,5 +16,9 @@ class Train:
     depart_time_s: int = 0
     # REMOVED: These will be managed in the simulator's meta dictionary
     # current_index: int = 0 
-    delay_s: int = 0
+    delay_s: Dict[str, int] = field(default_factory=lambda: {
+        "signal": 0, 
+        "platform": 0,
+        "crossing": 0
+    })
     status: str = "waiting"

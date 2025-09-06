@@ -1,11 +1,10 @@
-# rail_sim/infrastructure.py
-
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-# MOVED: Disruption dataclass now lives here to break the circular import.
+# This Disruption class is correctly placed at the top.
 @dataclass
 class Disruption:
+    """A simple data class to hold information about a network disruption."""
     section_u: str
     section_v: str
     start_time_s: int
@@ -29,7 +28,7 @@ class Station:
     max_train_len_m: int = 700
     is_junction: bool = False
     dwell_mean_s: int = 60
-    dwell_std_dev_s: int = 5 
+    dwell_std_dev_s: int = 5
     occupied_platforms: List[str] = field(default_factory=list)
 
 @dataclass
@@ -42,6 +41,34 @@ class Section:
     signalling: str = "absolute"
     gradient: float = 0.0
     blocks: List[Block] = field(default_factory=list)
-    # Fields to handle disruptions correctly
-    original_vmax_kmph: Optional[float] = None
+    
+    # --- MODIFICATIONS FOR ROBUST DISRUPTION HANDLING ---
+    
+    # CHANGED: This now stores the permanent, true original speed.
+    original_vmax_kmph: Optional[float] = field(init=False, default=None)
+    
+    # This list correctly tracks active disruptions.
     active_disruptions: List[Disruption] = field(default_factory=list)
+
+    # ADDED: A special method to set the original speed after the object is created.
+    def __post_init__(self):
+        """Sets the original_vmax_kmph once, after the object is initialized."""
+        self.original_vmax_kmph = self.vmax_kmph
+
+    # ADDED: The core logic for recalculating the section's speed.
+    def recalculate_vmax(self):
+        """
+        Calculates the current maximum speed based on the most severe
+        active disruption on this section.
+        """
+        if not self.active_disruptions:
+            # If no disruptions are active, restore the true original speed.
+            self.vmax_kmph = self.original_vmax_kmph
+            return
+
+        # Find the lowest speed_factor (i.e., the biggest speed reduction).
+        most_severe_factor = min(d.speed_factor for d in self.active_disruptions)
+        
+        # Apply the most severe disruption to the true original speed.
+        self.vmax_kmph = self.original_vmax_kmph * most_severe_factor
+

@@ -21,12 +21,13 @@ def run_scenario():
     # --- Step 3: Initialize and run the simulation ---
     # The simulator now starts with an empty list of active trains
     sim = Simulator(stations, sections)
-    
+
     # MODIFIED: Schedule a 'generate_train' event for each train
     # This will introduce them into the simulation at their departure time.
     for t in all_possible_trains:
         sim.schedule(t.depart_time_s, 'generate_train', t, {})
 
+    sim.schedule(0, 'check_for_random_event', None, {})
     sim.run()
 
 if __name__ == "__main__":

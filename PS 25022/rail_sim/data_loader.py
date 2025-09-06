@@ -3,7 +3,7 @@
 import csv
 from typing import Dict, Tuple, List
 # MODIFIED: Import Disruption from infrastructure now
-from .infrastructure import Station, Section, Disruption
+from .infrastructure import Station, Section, Disruption, Block
 from .trains import Train
 from dataclasses import replace
 
@@ -28,24 +28,45 @@ def load_stations(path: str) -> Dict[str, Station]:
             )
     return stations
 
-def load_sections(path: str) -> Dict[Tuple[str,str], Section]:
-    """Loads track section data from a CSV file."""
+def load_sections(path: str) -> Dict[Tuple[str, str], Section]:
+    """Loads track section data from a CSV and creates bidirectional paths."""
     sections = {}
     with open(path, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for r in reader:
-            sec = Section(
+            # Create the forward section as before
+            forward_sec = Section(
                 u=r['u'],
                 v=r['v'],
                 line_type=r['line_type'],
                 length_km=float(r['length_km']),
                 vmax_kmph=float(r['vmax_kmph']),
-                signalling=r.get('signalling','absolute'),
+                signalling=r.get('signalling', 'absolute'),
                 gradient=float(r.get('gradient', 0.0))
             )
-            sections[(sec.u, sec.v)] = sec
-            if sec.line_type == 'double':
-                sections[(sec.v, sec.u)] = replace(sec, u=sec.v, v=sec.u, blocks=[])
+            # NOTE: Assumes blocks are generated elsewhere and added to forward_sec.blocks
+            sections[(forward_sec.u, forward_sec.v)] = forward_sec
+
+            # --- START OF MODIFIED BLOCK ---
+            
+            # 1. Create a reversed list of blocks for the return journey.
+            reversed_blocks = [
+                Block(f"{forward_sec.v}-{forward_sec.u}-B{i+1}", b.length_km) 
+                for i, b in enumerate(reversed(forward_sec.blocks))
+            ]
+            
+            # 2. Create the reverse section using the reversed blocks.
+            #    This is no longer inside an 'if' statement.
+            reverse_sec = replace(
+                forward_sec, 
+                u=forward_sec.v, 
+                v=forward_sec.u, 
+                blocks=reversed_blocks
+            )
+            sections[(reverse_sec.u, reverse_sec.v)] = reverse_sec
+            
+            # --- END OF MODIFIED BLOCK ---
+            
     return sections
 
 def load_trains(path: str) -> List[Train]:

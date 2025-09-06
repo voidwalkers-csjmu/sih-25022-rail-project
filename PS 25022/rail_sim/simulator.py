@@ -3,10 +3,17 @@ import math
 import random
 from typing import Dict, Tuple, List, Optional
 from .trains import Train
-from .infrastructure import Section, Station, Block
+from .infrastructure import Section, Station, Block, Disruption
 from .logger import EventLogger
+from .analytics import average_delay, throughput
 
 class Simulator:
+    # Constants for random event generation
+    RANDOM_EVENT_CHECK_INTERVAL_S = 30  # Check for a random event every 30 minutes
+    RANDOM_EVENT_PROBABILITY = 0.10       # 10% chance of an event happening at each check
+    MIN_DISRUPTION_DURATION_S = 6       # 10 minutes
+    MAX_DISRUPTION_DURATION_S = 10      # 60 minutes
+
     def __init__(self, stations: Dict[str, Station], sections: Dict[Tuple[str, str], Section]):
         self.time = 0
         self.event_queue: List[Tuple[int, int, str, Train, dict]] = []
@@ -20,6 +27,7 @@ class Simulator:
         self.trains: List[Train] = [] 
         self.logger = EventLogger()
         self.event_counter = 0
+        self.is_disruption_active = False # ADD THIS LINE
 
     def schedule(self, time: int, event: str, train: Train, meta: dict):
         self.event_counter += 1
@@ -37,7 +45,16 @@ class Simulator:
                 if handler:
                     handler(train, meta)
                 else:
-                    self.logger.log(train.train_id, 'UNKNOWN_EVENT', event, reason=f"Meta: {meta}")
+                    # ADD A PRINT STATEMENT to see the mystery event
+                    print(f"DEBUG: Unknown event found: '{event}' with meta: {meta}")
+                    
+                    # FIX THE LOGGER to handle events with no train
+                    log_id = train.train_id if train else "System"
+                    self.logger.log(log_id, 'UNKNOWN_EVENT', event, reason=f"Meta: {meta}")
+
+                if self.trains and all(t.status == 'finished' for t in self.trains):
+                    print("\nAll trains have finished their journeys. Ending simulation.")
+                    break
             except IndexError:
                 break
         self.report()
@@ -56,6 +73,9 @@ class Simulator:
         transit_time = float('inf')
         
         if target_speed_ms is not None:
+
+            max_speed_ms = section.vmax_kmph * (1000 / 3600)
+            entry_speed_ms = min(entry_speed_ms, max_speed_ms)
             decel = train.base_deceleration_ms2
             dist_to_brake_m = (entry_speed_ms**2 - target_speed_ms**2) / (2 * decel) if decel > 0 else float('inf')
 
@@ -134,10 +154,23 @@ class Simulator:
         
         u, v = train.route[section_idx], train.route[section_idx + 1]
         section = self.sections.get((u, v))
+
         if not section or not section.blocks:
             self._move_to_next_section(train, section_idx, entry_speed_ms, meta)
             return
         
+        # --- ADD THIS BLOCK ---
+    # Log if the train is entering a disrupted section for the first time.
+        if block_idx == 0 and section.active_disruptions:
+            original_speed = section.original_vmax_kmph
+            current_speed = section.vmax_kmph
+            self.logger.log(
+                train.train_id, 
+                'AFFECTED_BY_DISRUPTION', 
+                f"section {section.u}-{section.v}",
+                f"Speed limited to {current_speed:.0f} km/h (original: {original_speed:.0f} km/h)"
+            )
+    # --- END OF ADDED BLOCK ---
         if block_idx == 0 and section.line_type == 'single':
             if not meta.get('reserved_path_sections'):
                 path_sections = self._get_single_line_path_sections(train, section_idx)
@@ -156,6 +189,8 @@ class Simulator:
                 
                 if not is_path_clear:
                     self.logger.log(train.train_id, 'HOLD_FOR_CROSSING', u, reason="Single-line path is reserved/occupied")
+                    if train.train_id not in self.hold_events: # Start the hold timer
+                        self.hold_events[train.train_id] = self.time
                     meta['entry_speed_ms'] = 0.0
                     self.schedule(self.time + 60, 'enter_block', train, meta)
                     return
@@ -174,7 +209,8 @@ class Simulator:
         elif block_idx + 1 < len(section.blocks):
             if self.block_occupancy.get(section.blocks[block_idx + 1].block_id): signal_aspect = 'yellow'
 
-        if signal_aspect == 'red' or (signal_aspect == 'yellow' and entry_speed_ms < 0.1):
+        # The new, corrected line
+        if signal_aspect == 'red':
             if train.train_id not in self.hold_events:
                 self.hold_events[train.train_id] = self.time
                 reason = "Signal is Red" if signal_aspect == 'red' else "Waiting at Yellow Signal"
@@ -184,13 +220,19 @@ class Simulator:
 
         if train.train_id in self.hold_events:
             wait_time = self.time - self.hold_events.pop(train.train_id)
-            train.delay_s += wait_time
+            last_log = self.logger.get_last_event_for_train(train.train_id)
+            if last_log and last_log['event'] == 'HOLD_FOR_CROSSING':
+                train.delays["crossing"] += wait_time
+            else:
+                train.delay_s["signal"] += wait_time
             self.logger.log(train.train_id, 'RELEASE', f"from before {block.block_id}", reason=f"Waited {wait_time}s")
 
         self.block_occupancy[block.block_id] = train.train_id
-        target_speed = 0.0 if signal_aspect == 'yellow' else None
+        # NEW LOGIC: Only set a braking target if the train is actually moving.
+        target_speed = None
+        if signal_aspect == 'yellow' and entry_speed_ms > 0.1: # Check if speed > 0
+            target_speed = 0.0
         run_time, exit_speed_ms = self._calculate_block_transit(train, section, block, entry_speed_ms, target_speed_ms=target_speed)
-        self.logger.log(train.train_id, 'ENTER_BLOCK', block.block_id, reason=f"Signal:{signal_aspect}, Speed:{entry_speed_ms*3.6:.1f}km/h, Time:{run_time}s")
         
         exit_meta = meta.copy()
         exit_meta.update({'block_idx': block_idx, 'exit_speed_ms': exit_speed_ms})
@@ -263,7 +305,7 @@ class Simulator:
 
         if train.train_id in self.hold_events:
             wait_time = self.time - self.hold_events.pop(train.train_id)
-            train.delay_s += wait_time
+            train.delays["platform"] += wait_time
             self.logger.log(train.train_id, 'RELEASE_FROM_PLATFORM_HOLD', station_code, reason=f"Waited {wait_time}s")
 
         if len(station.occupied_platforms) < station.num_platforms:
@@ -286,40 +328,145 @@ class Simulator:
             self.waiting_for_platform[station_code].append((train, meta))
             self.logger.log(train.train_id, 'HOLD_FOR_PLATFORM', station_code, reason="All platforms occupied")
 
+    # In simulator.py
+
     def handle_arrive(self, train: Train, meta: dict):
         dest_station_code = train.route[-1]
         dest_station = self.stations.get(dest_station_code)
-        if dest_station and train.train_id in dest_station.occupied_platforms:
-            dest_station.occupied_platforms.remove(train.train_id)
-            self.logger.log(train.train_id, 'FREE_PLATFORM_ON_ARRIVAL', dest_station_code)
-            
-            if self.waiting_for_platform.get(dest_station_code) and self.waiting_for_platform[dest_station_code]:
-                self.waiting_for_platform[dest_station_code].sort(key=lambda x: x[0].priority)
-                waiting_train, waiting_meta = self.waiting_for_platform[dest_station_code].pop(0)
-                self.logger.log(waiting_train.train_id, 'PLATFORM_AVAILABLE', dest_station_code, reason=f"Granted by priority {waiting_train.priority}")
-                self.schedule(self.time, 'enter_station', waiting_train, waiting_meta)
+        train.status = 'finished'
 
+        # --- START OF NEW LOGIC ---
+        if dest_station:
+            # Step 1: Briefly occupy the platform to correctly model resource usage.
+            # This is crucial for the logic to work.
+            if train.train_id not in dest_station.occupied_platforms:
+                dest_station.occupied_platforms.append(train.train_id)
+
+            # Step 2: Immediately free the platform.
+            if train.train_id in dest_station.occupied_platforms:
+                dest_station.occupied_platforms.remove(train.train_id)
+                self.logger.log(train.train_id, 'FREE_PLATFORM_ON_ARRIVAL', dest_station_code)
+
+                # Step 3: Nudge the next waiting train, if any.
+                waiting_list = self.waiting_for_platform.get(dest_station_code)
+                if waiting_list:
+                    waiting_list.sort(key=lambda x: x[0].priority)
+                    waiting_train, waiting_meta = waiting_list.pop(0)
+                    self.logger.log(waiting_train.train_id, 'PLATFORM_AVAILABLE', dest_station_code, f"Granted to {waiting_train.train_id}")
+                    self.schedule(self.time, 'enter_station', waiting_train, waiting_meta)
+        # --- END OF NEW LOGIC ---
+
+        # Release any reserved single-line paths
         path_to_release = meta.get('reserved_path_sections')
         if path_to_release:
-             self.logger.log(train.train_id, 'RELEASE_PATH', f"Final release on arrival")
-             for sec_u, sec_v in path_to_release:
-                 if self.section_reservations.get((sec_u, sec_v)) == train.train_id: del self.section_reservations[(sec_u, sec_v)]
-        train.status = 'finished'
-        self.logger.log(train.train_id, 'ARRIVE_JOURNEY_END', train.route[-1], reason=f"Total delay={train.delay_s}s")
+            self.logger.log(train.train_id, 'RELEASE_PATH', "Final release on arrival")
+            for sec_u, sec_v in path_to_release:
+                if self.section_reservations.get((sec_u, sec_v)) == train.train_id:
+                    del self.section_reservations[(sec_u, sec_v)]
+
+        self.logger.log(train.train_id, 'ARRIVE_JOURNEY_END', dest_station_code, f"Total delay={train.delay_s}s")
+    # in simulator.py, after handle_arrive and before report
+
+    def handle_start_disruption(self, train: Train, meta: dict):
+        # When a disruption starts, flip the switch to ON
+        # self.is_disruption_active = True # IMPORTANT
+        
+        disruption: Disruption = meta['disruption_data']
+        section_key = (disruption.section_u, disruption.section_v)
+        
+        for key in [section_key, section_key[::-1]]:
+            if key in self.sections:
+                section = self.sections[key]
+                section.active_disruptions.append(disruption)
+                section.recalculate_vmax()
+                # if section.original_vmax_kmph is None:
+                #     section.original_vmax_kmph = section.vmax_kmph
+                
+                # section.vmax_kmph *= disruption.speed_factor
+                self.logger.log("System", "DISRUPTION_START", f"{key[0]}-{key[1]}", f"Speed now {section.vmax_kmph:.0f} km/h")
+
+
+    def handle_end_disruption(self, train: Train, meta: dict):
+        # When a disruption ends, flip the switch to OFF
+        # self.is_disruption_active = False # IMPORTANT
+
+        # 
+        disruption_to_end: Disruption = meta['disruption_data']
+        section_key = (disruption_to_end.section_u, disruption_to_end.section_v)
+
+        for key in [section_key, section_key[::-1]]:
+            if key in self.sections:
+                section = self.sections[key]
+                # Remove the specific disruption from the list
+                section.active_disruptions = [d for d in section.active_disruptions if d != disruption_to_end]
+                # Ask the section to update its own speed
+                section.recalculate_vmax()
+                self.logger.log("System", "DISRUPTION_END", f"{key[0]}-{key[1]}", f"Speed now {section.vmax_kmph:.0f} km/h")
+        
+    def handle_check_for_random_event(self, train: Train, meta: dict):
+        # FIRST, check if a disruption is already active. If so, do nothing.
+        # if self.is_disruption_active:
+        #     return
+
+        # Always schedule the next check
+        self.schedule(self.time + self.RANDOM_EVENT_CHECK_INTERVAL_S, 'check_for_random_event', None, {})
+
+        if random.random() < self.RANDOM_EVENT_PROBABILITY:
+            # The new, corrected filter that targets ANY section
+            all_section_keys = [k for k, s in self.sections.items() if k[0] < k[1]]
+            if not all_section_keys:
+                return
+            
+            section_u, section_v = random.choice(all_section_keys)
+            duration = random.randint(self.MIN_DISRUPTION_DURATION_S, self.MAX_DISRUPTION_DURATION_S)
+            # print(f"DEBUG: New disruption created. Time={self.time}, Duration={duration}, End Time={self.time + duration}")
+            speed_factor = round(random.uniform(0.2, 0.7), 2)
+            
+            disruption = Disruption(
+                section_u=section_u, section_v=section_v,
+                start_time_s=self.time, end_time_s=self.time + duration,
+                speed_factor=speed_factor
+            )
+
+            self.logger.log("System", "RANDOM_EVENT", f"{section_u}-{section_v}", f"New disruption for {duration}s")
+            
+            self.schedule(self.time, 'start_disruption', None, {'disruption_data': disruption})
+            self.schedule(self.time + duration, 'end_disruption', None, {'disruption_data': disruption})
 
     def report(self):
-        print("\n=== SIM REPORT ===")
+        print("\n" + "="*20 + " SIMULATION REPORT " + "="*20)
+        
         all_trains_in_sim = sorted(self.trains, key=lambda t: t.train_id)
         finished_trains = [t for t in all_trains_in_sim if t.status == 'finished']
         
+        print("\n--- Overall Summary ---")
         print(f"Total trains generated: {len(all_trains_in_sim)}")
         print(f"Finished trains: {len(finished_trains)}")
+        print(f"Total simulation time: {self.time}s ({self.time/3600:.2f} hours)")
 
+        # --- NEW: Throughput Calculation ---
+        if self.time > 0:
+            network_throughput = throughput(len(finished_trains), self.time)
+            print(f"Network Throughput: {network_throughput:.2f} trains/hour")
+        
+        # --- NEW: Per-Train Delay Report ---
         if finished_trains:
-            total_delay = sum(t.delay_s for t in finished_trains)
-            avg_delay = total_delay / len(finished_trains) if finished_trains else 0
-            print(f"Total delay across all finished trains: {total_delay}s")
-            print(f"Average delay: {avg_delay:.1f}s")
+            print("\n--- Per-Train Delay Report ---")
+            total_system_delay = 0
+            for train in finished_trains:
+                total_delay = sum(train.delay_s.values())
+                total_system_delay += total_delay
+                
+                # Create a formatted string for the breakdown, e.g., "Signal: 90s, Platform: 31s"
+                delay_breakdown = ", ".join(
+                    f"{reason.title()}: {time}s" for reason, time in train.delay_s.items() if time > 0
+                )
+                if not delay_breakdown:
+                    delay_breakdown = "No delays"
+                print(f"  - {train.train_id} (Priority: {train.priority}): {train.delay_s}s delay")
+            # Using your analytics function for the average
+            avg_delay = average_delay(finished_trains)
+            print(f"\nAverage delay for finished trains: {avg_delay:.1f}s")
         
         unfinished_trains = [t for t in all_trains_in_sim if t.status != 'finished']
         if unfinished_trains:
@@ -329,3 +476,4 @@ class Simulator:
 
         self.logger.export("simulation_events.csv")
         print("\n[Logs saved to simulation_events.csv]")
+        print("="*61)
